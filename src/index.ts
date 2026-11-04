@@ -337,7 +337,7 @@ app.post('/api/vote', authMiddleware, requireVoter, (req: Request, res: Response
    4. ADMIN DASHBOARD & APPROVAL ENDPOINTS
 ======================================================== */
 app.get('/api/admin/voters', authMiddleware, requireAdmin, (_req: Request, res: Response) => {
-  const rows = db.prepare('SELECT id, name, email, role, constituency, is_approved_voter, has_voted, created_at FROM users WHERE role != "ADMIN"').all() as any[];
+  const rows = db.prepare("SELECT id, name, email, role, constituency, is_approved_voter, has_voted, created_at FROM users WHERE role != 'ADMIN'").all() as any[];
   const voters: User[] = rows.map((r) => ({
     id: r.id,
     name: r.name,
@@ -368,6 +368,38 @@ app.patch('/api/admin/voters/:id/approve', authMiddleware, requireAdmin, (req: R
 
   db.prepare('UPDATE users SET is_approved_voter = ? WHERE id = ?').run(isApproved ? 1 : 0, id);
   res.json({ success: true, isApproved: Boolean(isApproved) });
+});
+
+/* Admin-created voter registration */
+app.post('/api/admin/voters', authMiddleware, requireAdmin, (req: Request, res: Response): void => {
+  const { name, voterId, pin, constituency } = req.body;
+
+  if (!name || !voterId || !pin) {
+    res.status(400).json({ error: 'Name, Voter ID, and PIN are required.' });
+    return;
+  }
+
+  if (!/^\d{4}$/.test(pin)) {
+    res.status(400).json({ error: 'PIN must be exactly 4 digits.' });
+    return;
+  }
+
+  const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(voterId) as any;
+  if (existing) {
+    res.status(409).json({ error: 'A voter with this Voter ID already exists.' });
+    return;
+  }
+
+  const pinHash = bcrypt.hashSync(pin, 10);
+  const syntheticEmail = `${voterId}@voter.eastgodavari.gov.in`;
+
+  db.prepare(`
+    INSERT INTO users (id, name, email, password_hash, role, constituency, is_approved_voter, has_voted)
+    VALUES (?, ?, ?, ?, 'VOTER', ?, 1, 0)
+  `).run(voterId, name, syntheticEmail, pinHash, constituency || 'East Godavari');
+
+  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(voterId) as any;
+  res.status(201).json({ success: true, message: 'Voter registered and authorized to vote.', user: formatUser(row) });
 });
 
 app.get('/api/admin/candidates', authMiddleware, requireAdmin, (_req: Request, res: Response) => {
@@ -408,8 +440,8 @@ app.patch('/api/admin/candidates/:id/status', authMiddleware, requireAdmin, (req
 });
 
 app.get('/api/admin/stats', authMiddleware, requireAdmin, (_req: Request, res: Response) => {
-  const totalRegisteredUsers = (db.prepare('SELECT COUNT(*) as c FROM users WHERE role = "VOTER"').get() as any).c;
-  const totalApprovedVoters = (db.prepare('SELECT COUNT(*) as c FROM users WHERE role = "VOTER" AND is_approved_voter = 1').get() as any).c;
+  const totalRegisteredUsers = (db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'VOTER'").get() as any).c;
+  const totalApprovedVoters = (db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'VOTER' AND is_approved_voter = 1").get() as any).c;
   const totalVotesCast = (db.prepare('SELECT COALESCE(SUM(total_votes), 0) as s FROM candidate_vote_counts').get() as any).s;
 
   const votingPercentage = totalApprovedVoters > 0 ? Math.round((totalVotesCast / totalApprovedVoters) * 100) : 0;

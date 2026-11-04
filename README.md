@@ -120,6 +120,7 @@ Base URL: `http://localhost:5000/api`
 | Method | Path                                   | Auth         | Description |
 | ------ | ---------------------------------------- | ------------ | ------------ |
 | GET    | `/admin/voters`                          | Bearer + Admin | List all voters/candidates with approval + voted status |
+| POST   | `/admin/voters`                          | Bearer + Admin | `{ name, voterId, pin, constituency? }` — register a new voter directly (4-digit PIN, auto-authorized to vote) |
 | PATCH  | `/admin/voters/:id/approve`              | Bearer + Admin | `{ isApproved }` — grant/revoke voting eligibility (blocked once the voter has voted) |
 | GET    | `/admin/candidates`                      | Bearer + Admin | List every nomination (any status) with live vote counts |
 | PATCH  | `/admin/candidates/:id/status`           | Bearer + Admin | `{ status: APPROVED \| REJECTED \| PENDING }` |
