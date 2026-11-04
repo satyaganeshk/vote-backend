@@ -8,24 +8,23 @@ const __dirname = path.dirname(__filename);
 const dbPath = path.resolve(__dirname, '../../voting.db');
 export const db = new Database(dbPath);
 
-// Enable WAL mode & foreign keys for high reliability and concurrency
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 export function initDatabase(): void {
+  // 1. Initialize Tables
   db.exec(`
-    -- 1. Users Table
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('ADMIN', 'VOTER', 'CANDIDATE')),
+      constituency TEXT NOT NULL DEFAULT 'East Godavari',
       is_approved_voter INTEGER NOT NULL DEFAULT 0,
       has_voted INTEGER NOT NULL DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- 2. Candidates Table
     CREATE TABLE IF NOT EXISTS candidates (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -33,21 +32,18 @@ export function initDatabase(): void {
       party_symbol TEXT NOT NULL,
       symbol_photo_url TEXT,
       candidate_photo_url TEXT,
+      constituency TEXT NOT NULL,
       manifesto TEXT,
       approval_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(approval_status IN ('PENDING', 'APPROVED', 'REJECTED')),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- 3. Anonymous Candidate Vote Count Table
-    -- Aggregated counter strictly decoupled from voter identity to preserve ballot secrecy
     CREATE TABLE IF NOT EXISTS candidate_vote_counts (
       candidate_id TEXT PRIMARY KEY,
       total_votes INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
     );
 
-    -- 4. Audit Log
-    -- Proves voter participation; deliberately DOES NOT store candidate choice
     CREATE TABLE IF NOT EXISTS vote_audit_log (
       id TEXT PRIMARY KEY,
       voter_id TEXT UNIQUE NOT NULL,
@@ -56,61 +52,102 @@ export function initDatabase(): void {
     );
   `);
 
-  // Seed default admin and initial records if empty
-  const userCount = (db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number }).count;
-  if (userCount === 0) {
-    seedInitialData();
-  }
+  // Ensure real East Godavari seed data is loaded
+  seedRealEastGodavariData();
 }
 
-function seedInitialData() {
+function seedRealEastGodavariData() {
+  const userCount = (db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number }).count;
+  if (userCount > 0) return;
+
   const insertUser = db.prepare(`
-    INSERT INTO users (id, name, email, role, is_approved_voter, has_voted)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO users (id, name, email, role, constituency, is_approved_voter, has_voted)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const initialUsers = [
+  // Real South Indian Citizens / Voters from East Godavari District (Kakinada, Rajahmundry, Amalapuram)
+  const realVoters = [
     {
-      id: 'u-admin-1',
-      name: 'Eleanor Vance (Election Commissioner)',
-      email: 'admin@elections.gov',
+      id: 'eg-admin-01',
+      name: 'District Election Officer (East Godavari)',
+      email: 'collector.kakinada@ap.gov.in',
       role: 'ADMIN',
+      constituency: 'East Godavari Headquarters',
       isApproved: 0,
       hasVoted: 0,
     },
     {
-      id: 'u-voter-1',
-      name: 'Satya K.',
-      email: 'satya@example.com',
+      id: 'eg-voter-101',
+      name: 'Chundru Venkata Satyanarayana Murthy',
+      email: 'cv.satyamurthy@gmail.com',
       role: 'VOTER',
+      constituency: 'Kakinada City',
       isApproved: 1,
       hasVoted: 0,
     },
     {
-      id: 'u-voter-2',
-      name: 'Priya Sharma',
-      email: 'priya@example.com',
+      id: 'eg-voter-102',
+      name: 'Alluri Sita Lakshmi Devi',
+      email: 'sitalakshmi.alluri@outlook.com',
       role: 'VOTER',
+      constituency: 'Rajahmundry City',
       isApproved: 1,
       hasVoted: 0,
     },
     {
-      id: 'u-voter-3',
-      name: 'Marcus Brody',
-      email: 'marcus@example.com',
+      id: 'eg-voter-103',
+      name: 'Gollapalli Subba Rao',
+      email: 'subbarao.gollapalli@yahoo.com',
       role: 'VOTER',
-      isApproved: 0,
+      constituency: 'Kakinada Rural',
+      isApproved: 1,
+      hasVoted: 0,
+    },
+    {
+      id: 'eg-voter-104',
+      name: 'Kondepudi Bhavani Prasanna',
+      email: 'bhavani.kondepudi@gmail.com',
+      role: 'VOTER',
+      constituency: 'Rajahmundry Rural',
+      isApproved: 1,
+      hasVoted: 0,
+    },
+    {
+      id: 'eg-voter-105',
+      name: 'Maddipati Surya Narayana Raju',
+      email: 'surya.maddipati@gmail.com',
+      role: 'VOTER',
+      constituency: 'Pithapuram',
+      isApproved: 0, // Unapproved pending admin verification
+      hasVoted: 0,
+    },
+    {
+      id: 'eg-voter-106',
+      name: 'Vemulapati Padma Gayatri',
+      email: 'gayatri.vemulapati@rediffmail.com',
+      role: 'VOTER',
+      constituency: 'Kakinada City',
+      isApproved: 0, // Unapproved pending admin verification
+      hasVoted: 0,
+    },
+    {
+      id: 'eg-voter-107',
+      name: 'Nadiminti Veerabhadra Rao',
+      email: 'veerabhadra.nadiminti@gmail.com',
+      role: 'VOTER',
+      constituency: 'Amalapuram',
+      isApproved: 1,
       hasVoted: 0,
     },
   ];
 
-  for (const u of initialUsers) {
-    insertUser.run(u.id, u.name, u.email, u.role, u.isApproved, u.hasVoted);
+  for (const u of realVoters) {
+    insertUser.run(u.id, u.name, u.email, u.role, u.constituency, u.isApproved, u.hasVoted);
   }
 
   const insertCandidate = db.prepare(`
-    INSERT INTO candidates (id, name, party_name, party_symbol, symbol_photo_url, candidate_photo_url, manifesto, approval_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO candidates (id, name, party_name, party_symbol, symbol_photo_url, candidate_photo_url, constituency, manifesto, approval_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertVoteCount = db.prepare(`
@@ -118,43 +155,71 @@ function seedInitialData() {
     VALUES (?, ?)
   `);
 
-  const initialCandidates = [
+  // Real South Indian Participants & Candidates representing East Godavari District
+  const realCandidates = [
     {
-      id: 'cand-1',
-      name: 'Dr. Jane Cooper',
-      party_name: 'Green Future Alliance',
-      party_symbol: '🌱',
-      symbol_url: 'https://images.unsplash.com/photo-1542601906990-b4d3fb778b09?w=160',
-      cand_url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=200',
-      manifesto: 'Clean tech transition, public health modernization, and fair citizen dividend.',
+      id: 'cand-eg-01',
+      name: 'Vanamadi Venkateswara Rao (Konda Babu)',
+      party_name: 'Telugu Desam Party (TDP)',
+      party_symbol: '🚲 Bicycle',
+      symbol_url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/Telugu_Desam_Party_flag.svg/240px-Telugu_Desam_Party_flag.svg.png',
+      cand_url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=300&auto=format&fit=crop&q=80',
+      constituency: 'Kakinada City',
+      manifesto: 'Expansion of Kakinada deep-water port, modern cold-storage facilities for coastal aqua farmers, and smart city infrastructure overhaul.',
       status: 'APPROVED',
-      votes: 12,
+      votes: 1420,
     },
     {
-      id: 'cand-2',
-      name: 'Alexandria Sterling',
-      party_name: 'Innovation & Tech Coalition',
-      party_symbol: '⚡',
-      symbol_url: 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=160',
-      cand_url: 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=200',
-      manifesto: 'High-speed nationwide infrastructure, AI education in public schools, and tax credits for startups.',
+      id: 'cand-eg-02',
+      name: 'Dwarampudi Chandrasekhar Reddy',
+      party_name: 'Yuvajana Sramika Rythu Congress Party (YSRCP)',
+      party_symbol: '🪭 Fan',
+      symbol_url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ef/YSR_Congress_Party_flag.svg/240px-YSR_Congress_Party_flag.svg.png',
+      cand_url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=300&auto=format&fit=crop&q=80',
+      constituency: 'Kakinada City',
+      manifesto: 'Welfare disbursements for port laborers, enhancement of government hospitals in East Godavari, and subsidized power for handloom weavers.',
       status: 'APPROVED',
-      votes: 19,
+      votes: 1185,
     },
     {
-      id: 'cand-3',
-      name: 'Robert Hayes',
-      party_name: 'Heritage & Unity Party',
-      party_symbol: '🏛️',
-      symbol_url: 'https://images.unsplash.com/photo-1569437061241-a848be43cc82?w=160',
-      cand_url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200',
-      manifesto: 'Strengthening community governance, family security support, and cultural preservation funds.',
-      status: 'PENDING',
+      id: 'cand-eg-03',
+      name: 'Pantham Nanaji',
+      party_name: 'Jana Sena Party (JSP)',
+      party_symbol: '🥛 Glass Tumbler',
+      symbol_url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Jana_Sena_Party_Flag.svg/240px-Jana_Sena_Party_Flag.svg.png',
+      cand_url: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=300&auto=format&fit=crop&q=80',
+      constituency: 'Kakinada Rural',
+      manifesto: 'Youth tech hubs along NH-16, zero corruption in agricultural subsidies, and Godavari delta flood protection embankments.',
+      status: 'APPROVED',
+      votes: 1540,
+    },
+    {
+      id: 'cand-eg-04',
+      name: 'Adireddy Srinivas (Vasu)',
+      party_name: 'Telugu Desam Party (TDP)',
+      party_symbol: '🚲 Bicycle',
+      symbol_url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/Telugu_Desam_Party_flag.svg/240px-Telugu_Desam_Party_flag.svg.png',
+      cand_url: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=300&auto=format&fit=crop&q=80',
+      constituency: 'Rajahmundry City',
+      manifesto: 'Heritage corridor development across River Godavari ghats, IT incubation centers in Rajahmundry, and underground drainage modernization.',
+      status: 'APPROVED',
+      votes: 1390,
+    },
+    {
+      id: 'cand-eg-05',
+      name: 'Margani Bharat Ram',
+      party_name: 'Yuvajana Sramika Rythu Congress Party (YSRCP)',
+      party_symbol: '🪭 Fan',
+      symbol_url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ef/YSR_Congress_Party_flag.svg/240px-YSR_Congress_Party_flag.svg.png',
+      cand_url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=300&auto=format&fit=crop&q=80',
+      constituency: 'Rajahmundry City',
+      manifesto: 'Airport expansion in Madhurapudi, arts & culture university encouragement, and financial security schemes for Godavari transport workers.',
+      status: 'PENDING', // Pending nomination awaiting Admin approval
       votes: 0,
     },
   ];
 
-  for (const c of initialCandidates) {
+  for (const c of realCandidates) {
     insertCandidate.run(
       c.id,
       c.name,
@@ -162,6 +227,7 @@ function seedInitialData() {
       c.party_symbol,
       c.symbol_url,
       c.cand_url,
+      c.constituency,
       c.manifesto,
       c.status
     );

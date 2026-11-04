@@ -5,6 +5,7 @@ export interface User {
   name: string;
   email: string;
   role: Role;
+  constituency?: string;
   isApprovedVoter: boolean;
   hasVoted: boolean;
   createdAt?: string;
@@ -19,6 +20,7 @@ export interface Candidate {
   partySymbol: string;
   symbolPhotoUrl?: string;
   candidatePhotoUrl?: string;
+  constituency?: string;
   manifesto?: string;
   approvalStatus: CandidateApprovalStatus;
   voteCount?: number;
