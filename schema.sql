@@ -4,7 +4,7 @@
 -- STRICT ANONYMOUS BALLOT GUARANTEE:
 -- Neither the database schema, nor stored procedures, nor foreign keys allow 
 -- correlating which voter voted for which candidate.
--- 1. users: Tracks registration, role, and whether voter has cast their single ballot.
+-- 1. users: Tracks registration, role, password/pin hash, and has_voted status.
 -- 2. candidates: Real political nominees from East Godavari (Kakinada / Rajahmundry).
 -- 3. candidate_vote_counts: Aggregated tally per candidate (Admin aggregate view only).
 -- 4. vote_audit_log: Proof of participation timestamped per voter (ZERO candidate info).
@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('ADMIN', 'VOTER', 'CANDIDATE')),
     constituency TEXT NOT NULL DEFAULT 'East Godavari',
     is_approved_voter INTEGER NOT NULL DEFAULT 0,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- 2. Candidates Table
 CREATE TABLE IF NOT EXISTS candidates (
     id TEXT PRIMARY KEY,
+    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     name TEXT NOT NULL,
     party_name TEXT NOT NULL,
     party_symbol TEXT NOT NULL,

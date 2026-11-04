@@ -1,82 +1,195 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { db, initDatabase } from './db.js';
-import type { Candidate, User, ElectionStats } from './models/index.js';
+import type { Candidate, User, ElectionStats, AuthResponse } from './models/index.js';
 
 initDatabase();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'east_godavari_election_super_secure_key_2026';
+const TOKEN_EXPIRY_SECONDS = 3600; // 1 hour
 
 app.use(cors());
 app.use(express.json());
 
-// Simulated RBAC session middleware (reads X-User-Id header)
-const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-  const userId = req.headers['x-user-id'] as string;
-  if (!userId) {
-    res.status(401).json({ error: 'Authentication required. Provide X-User-Id header.' });
-    return;
+// Helper to format user response
+function formatUser(row: any): User {
+  // Find associated candidateId if role is CANDIDATE
+  let candidateId: string | undefined = undefined;
+  if (row.role === 'CANDIDATE') {
+    const cand = db.prepare('SELECT id FROM candidates WHERE user_id = ?').get(row.id) as any;
+    if (cand) candidateId = cand.id;
   }
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
-  if (!user) {
-    res.status(403).json({ error: 'User does not exist in election registry.' });
-    return;
-  }
-  (req as any).user = {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    constituency: user.constituency,
-    isApprovedVoter: Boolean(user.is_approved_voter),
-    hasVoted: Boolean(user.has_voted),
+
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role,
+    constituency: row.constituency,
+    isApprovedVoter: Boolean(row.is_approved_voter),
+    hasVoted: Boolean(row.has_voted),
+    candidateId,
+    createdAt: row.created_at,
   };
-  next();
+}
+
+// Generate JWT token
+function generateToken(user: User): string {
+  return jwt.sign(
+    {
+      id: user.id,
+      role: user.role,
+      name: user.name,
+      email: user.email,
+    },
+    JWT_SECRET,
+    { expiresIn: TOKEN_EXPIRY_SECONDS }
+  );
+}
+
+// Authentication middleware checking Bearer JWT
+const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Session expired or authentication missing.' });
+    return;
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id) as any;
+    if (!userRow) {
+      res.status(401).json({ error: 'Account no longer exists in election registry.' });
+      return;
+    }
+    (req as any).user = formatUser(userRow);
+    next();
+  } catch (err: any) {
+    res.status(401).json({ error: 'Token expired or invalid.' });
+  }
 };
 
+// Role authorization guards
 const requireAdmin = (req: Request, res: Response, next: NextFunction): void => {
   const user = (req as any).user as User;
   if (!user || user.role !== 'ADMIN') {
-    res.status(403).json({ error: 'Access denied: Election Commission Admin privileges required.' });
+    res.status(403).json({ error: 'Access denied: Admin role required.' });
+    return;
+  }
+  next();
+};
+
+const requireVoter = (req: Request, res: Response, next: NextFunction): void => {
+  const user = (req as any).user as User;
+  if (!user || user.role !== 'VOTER') {
+    res.status(403).json({ error: 'Access denied: Voter role required.' });
+    return;
+  }
+  next();
+};
+
+const requireCandidate = (req: Request, res: Response, next: NextFunction): void => {
+  const user = (req as any).user as User;
+  if (!user || user.role !== 'CANDIDATE') {
+    res.status(403).json({ error: 'Access denied: Candidate role required.' });
     return;
   }
   next();
 };
 
 /* ========================================================
-   1. USER & SESSION ROUTES (NO MOCK DATA)
+   1. AUTHENTICATION ENDPOINTS
 ======================================================== */
-app.get('/api/users', (_req: Request, res: Response) => {
-  const rows = db.prepare('SELECT id, name, email, role, constituency, is_approved_voter, has_voted FROM users').all() as any[];
-  const users: User[] = rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    email: r.email,
-    role: r.role,
-    constituency: r.constituency,
-    isApprovedVoter: Boolean(r.is_approved_voter),
-    hasVoted: Boolean(r.has_voted),
-  }));
-  res.json(users);
+
+// Voter Login (Voter ID + PIN)
+// Generic error message if invalid credentials
+app.post('/api/auth/voter-login', (req: Request, res: Response): void => {
+  const { voterId, pin } = req.body;
+
+  if (!voterId || !pin) {
+    res.status(400).json({ error: 'Invalid voter ID or PIN.' });
+    return;
+  }
+
+  const userRow = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'VOTER'").get(voterId) as any;
+  if (!userRow) {
+    res.status(401).json({ error: 'Invalid voter ID or PIN.' });
+    return;
+  }
+
+  const isValidPin = bcrypt.compareSync(pin, userRow.password_hash);
+  if (!isValidPin) {
+    res.status(401).json({ error: 'Invalid voter ID or PIN.' });
+    return;
+  }
+
+  const user = formatUser(userRow);
+  const token = generateToken(user);
+
+  const response: AuthResponse = {
+    user,
+    token,
+    expiresIn: TOKEN_EXPIRY_SECONDS,
+  };
+  res.json(response);
 });
 
-app.get('/api/me', authMiddleware, (req: Request, res: Response) => {
-  res.json((req as any).user);
+// Admin / Candidate Login (Email + Password)
+// Generic error message if invalid credentials
+app.post('/api/auth/login', (req: Request, res: Response): void => {
+  const { email, password, role } = req.body;
+
+  if (!email || !password || !role) {
+    res.status(400).json({ error: 'Invalid email or password.' });
+    return;
+  }
+
+  const userRow = db.prepare('SELECT * FROM users WHERE email = ? AND role = ?').get(email, role) as any;
+  if (!userRow) {
+    res.status(401).json({ error: 'Invalid email or password.' });
+    return;
+  }
+
+  const isValidPassword = bcrypt.compareSync(password, userRow.password_hash);
+  if (!isValidPassword) {
+    res.status(401).json({ error: 'Invalid email or password.' });
+    return;
+  }
+
+  const user = formatUser(userRow);
+  const token = generateToken(user);
+
+  const response: AuthResponse = {
+    user,
+    token,
+    expiresIn: TOKEN_EXPIRY_SECONDS,
+  };
+  res.json(response);
+});
+
+// Get current session from token
+app.get('/api/auth/me', authMiddleware, (req: Request, res: Response) => {
+  res.json({ user: (req as any).user });
 });
 
 /* ========================================================
-   2. CANDIDATE ROUTES (PUBLIC / VOTER)
+   2. PUBLIC & VOTER CANDIDATE ROUTES
 ======================================================== */
 app.get('/api/candidates', (_req: Request, res: Response) => {
   const rows = db.prepare(`
-    SELECT id, name, party_name, party_symbol, symbol_photo_url, candidate_photo_url, constituency, manifesto, approval_status
+    SELECT id, user_id, name, party_name, party_symbol, symbol_photo_url, candidate_photo_url, constituency, manifesto, approval_status
     FROM candidates
     WHERE approval_status = 'APPROVED'
   `).all() as any[];
 
   const candidates: Candidate[] = rows.map((r) => ({
     id: r.id,
+    userId: r.user_id,
     name: r.name,
     partyName: r.party_name,
     partySymbol: r.party_symbol,
@@ -89,7 +202,57 @@ app.get('/api/candidates', (_req: Request, res: Response) => {
   res.json(candidates);
 });
 
-/* Candidate Nomination (East Godavari) */
+// Candidate Own Profile (Candidate route only)
+app.get('/api/candidate/me', authMiddleware, requireCandidate, (req: Request, res: Response): void => {
+  const user = (req as any).user as User;
+  const cand = db.prepare(`
+    SELECT c.*, COALESCE(v.total_votes, 0) as total_votes 
+    FROM candidates c
+    LEFT JOIN candidate_vote_counts v ON c.id = v.candidate_id
+    WHERE c.user_id = ?
+  `).get(user.id) as any;
+
+  if (!cand) {
+    res.status(404).json({ error: 'Candidate profile not found.' });
+    return;
+  }
+
+  const candidateProfile: Candidate = {
+    id: cand.id,
+    userId: cand.user_id,
+    name: cand.name,
+    partyName: cand.party_name,
+    partySymbol: cand.party_symbol,
+    symbolPhotoUrl: cand.symbol_photo_url,
+    candidatePhotoUrl: cand.candidate_photo_url,
+    constituency: cand.constituency,
+    manifesto: cand.manifesto,
+    approvalStatus: cand.approval_status,
+    voteCount: cand.total_votes,
+    createdAt: cand.created_at,
+  };
+
+  res.json(candidateProfile);
+});
+
+// Update own candidate profile (manifesto, photos, etc.)
+app.put('/api/candidate/me', authMiddleware, requireCandidate, (req: Request, res: Response): void => {
+  const user = (req as any).user as User;
+  const { manifesto, symbolPhotoUrl, candidatePhotoUrl, partySymbol } = req.body;
+
+  db.prepare(`
+    UPDATE candidates 
+    SET manifesto = COALESCE(?, manifesto),
+        symbol_photo_url = COALESCE(?, symbol_photo_url),
+        candidate_photo_url = COALESCE(?, candidate_photo_url),
+        party_symbol = COALESCE(?, party_symbol)
+    WHERE user_id = ?
+  `).run(manifesto || null, symbolPhotoUrl || null, candidatePhotoUrl || null, partySymbol || null, user.id);
+
+  res.json({ success: true, message: 'Candidate profile updated successfully.' });
+});
+
+/* Candidate Nomination */
 app.post('/api/candidates/nominate', (req: Request, res: Response): void => {
   const { name, partyName, partySymbol, symbolPhotoUrl, candidatePhotoUrl, constituency, manifesto } = req.body;
 
@@ -124,7 +287,7 @@ app.post('/api/candidates/nominate', (req: Request, res: Response): void => {
 /* ========================================================
    3. VOTING TRANSACTION (STRICT SINGLE VOTE & SECRET BALLOT)
 ======================================================== */
-app.post('/api/vote', authMiddleware, (req: Request, res: Response): void => {
+app.post('/api/vote', authMiddleware, requireVoter, (req: Request, res: Response): void => {
   const voter = (req as any).user as User;
   const { candidateId } = req.body;
 
@@ -133,35 +296,26 @@ app.post('/api/vote', authMiddleware, (req: Request, res: Response): void => {
     return;
   }
 
-  // Strict Policy Check 1: Admins cannot vote
-  if (voter.role === 'ADMIN') {
-    res.status(403).json({ error: 'Election Commission Administrators are strictly neutral and forbidden to vote.' });
+  // Double check voter record in DB for race conditions
+  const freshVoter = db.prepare('SELECT is_approved_voter, has_voted FROM users WHERE id = ?').get(voter.id) as any;
+  if (!freshVoter || !freshVoter.is_approved_voter) {
+    res.status(403).json({ error: 'You are not authorized by the election administrator to vote.' });
     return;
   }
 
-  // Strict Policy Check 2: Must be approved voter
-  if (!voter.isApprovedVoter) {
-    res.status(403).json({ error: 'You are not approved by the election administrator to cast a vote.' });
+  if (freshVoter.has_voted) {
+    res.status(409).json({ error: 'You have already voted. Under election law, votes cannot be repeated or changed.' });
     return;
   }
 
-  // Strict Policy Check 3: Strictly one vote only (no multiple votes, no withdrawal)
-  if (voter.hasVoted) {
-    res.status(409).json({ error: 'Vote already recorded. Strict policy: Multiple or modified votes are prohibited.' });
-    return;
-  }
-
-  // Strict Policy Check 4: Candidate must exist and be APPROVED
   const candidate = db.prepare('SELECT id, approval_status FROM candidates WHERE id = ?').get(candidateId) as any;
   if (!candidate || candidate.approval_status !== 'APPROVED') {
-    res.status(404).json({ error: 'Target candidate does not exist or is not approved for election.' });
+    res.status(404).json({ error: 'Candidate is not approved for election.' });
     return;
   }
 
   // ATOMIC DATABASE TRANSACTION:
-  // 1. Mark voter has_voted = 1
-  // 2. Insert audit proof in vote_audit_log (NO candidate foreign key / trace)
-  // 3. Increment candidate aggregate tally in candidate_vote_counts
+  // Decoupled ballot: users table has_voted = 1, candidate_vote_counts + 1
   const executeVote = db.transaction(() => {
     db.prepare('UPDATE users SET has_voted = 1 WHERE id = ?').run(voter.id);
 
@@ -182,7 +336,6 @@ app.post('/api/vote', authMiddleware, (req: Request, res: Response): void => {
 /* ========================================================
    4. ADMIN DASHBOARD & APPROVAL ENDPOINTS
 ======================================================== */
-/* List all voters */
 app.get('/api/admin/voters', authMiddleware, requireAdmin, (_req: Request, res: Response) => {
   const rows = db.prepare('SELECT id, name, email, role, constituency, is_approved_voter, has_voted, created_at FROM users WHERE role != "ADMIN"').all() as any[];
   const voters: User[] = rows.map((r) => ({
@@ -198,7 +351,6 @@ app.get('/api/admin/voters', authMiddleware, requireAdmin, (_req: Request, res: 
   res.json(voters);
 });
 
-/* Authorize or restrict voter */
 app.patch('/api/admin/voters/:id/approve', authMiddleware, requireAdmin, (req: Request, res: Response): void => {
   const { id } = req.params;
   const { isApproved } = req.body;
@@ -209,7 +361,6 @@ app.patch('/api/admin/voters/:id/approve', authMiddleware, requireAdmin, (req: R
     return;
   }
 
-  // Strict Policy: Admin cannot alter authorization after a vote has already been cast
   if (target.has_voted) {
     res.status(400).json({ error: 'Cannot alter voter authorization after ballot has already been cast.' });
     return;
@@ -219,10 +370,9 @@ app.patch('/api/admin/voters/:id/approve', authMiddleware, requireAdmin, (req: R
   res.json({ success: true, isApproved: Boolean(isApproved) });
 });
 
-/* List all candidates (with vote counts for Admin only) */
 app.get('/api/admin/candidates', authMiddleware, requireAdmin, (_req: Request, res: Response) => {
   const rows = db.prepare(`
-    SELECT c.id, c.name, c.party_name, c.party_symbol, c.symbol_photo_url, c.candidate_photo_url, 
+    SELECT c.id, c.user_id, c.name, c.party_name, c.party_symbol, c.symbol_photo_url, c.candidate_photo_url, 
            c.constituency, c.manifesto, c.approval_status, COALESCE(v.total_votes, 0) as total_votes
     FROM candidates c
     LEFT JOIN candidate_vote_counts v ON c.id = v.candidate_id
@@ -230,6 +380,7 @@ app.get('/api/admin/candidates', authMiddleware, requireAdmin, (_req: Request, r
 
   const candidates: Candidate[] = rows.map((r) => ({
     id: r.id,
+    userId: r.user_id,
     name: r.name,
     partyName: r.party_name,
     partySymbol: r.party_symbol,
@@ -243,7 +394,6 @@ app.get('/api/admin/candidates', authMiddleware, requireAdmin, (_req: Request, r
   res.json(candidates);
 });
 
-/* Approve or Reject candidate */
 app.patch('/api/admin/candidates/:id/status', authMiddleware, requireAdmin, (req: Request, res: Response): void => {
   const { id } = req.params;
   const { status } = req.body;
@@ -257,10 +407,9 @@ app.patch('/api/admin/candidates/:id/status', authMiddleware, requireAdmin, (req
   res.json({ success: true, candidateId: id, status });
 });
 
-/* Election aggregate stats */
 app.get('/api/admin/stats', authMiddleware, requireAdmin, (_req: Request, res: Response) => {
-  const totalRegisteredUsers = (db.prepare('SELECT COUNT(*) as c FROM users WHERE role != "ADMIN"').get() as any).c;
-  const totalApprovedVoters = (db.prepare('SELECT COUNT(*) as c FROM users WHERE role != "ADMIN" AND is_approved_voter = 1').get() as any).c;
+  const totalRegisteredUsers = (db.prepare('SELECT COUNT(*) as c FROM users WHERE role = "VOTER"').get() as any).c;
+  const totalApprovedVoters = (db.prepare('SELECT COUNT(*) as c FROM users WHERE role = "VOTER" AND is_approved_voter = 1').get() as any).c;
   const totalVotesCast = (db.prepare('SELECT COALESCE(SUM(total_votes), 0) as s FROM candidate_vote_counts').get() as any).s;
 
   const votingPercentage = totalApprovedVoters > 0 ? Math.round((totalVotesCast / totalApprovedVoters) * 100) : 0;

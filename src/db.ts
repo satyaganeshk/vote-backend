@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import bcrypt from 'bcryptjs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -12,12 +13,13 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 export function initDatabase(): void {
-  // 1. Initialize Tables
+  // Create tables
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('ADMIN', 'VOTER', 'CANDIDATE')),
       constituency TEXT NOT NULL DEFAULT 'East Godavari',
       is_approved_voter INTEGER NOT NULL DEFAULT 0,
@@ -27,6 +29,7 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS candidates (
       id TEXT PRIMARY KEY,
+      user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
       name TEXT NOT NULL,
       party_name TEXT NOT NULL,
       party_symbol TEXT NOT NULL,
@@ -52,7 +55,6 @@ export function initDatabase(): void {
     );
   `);
 
-  // Ensure real East Godavari seed data is loaded
   seedRealEastGodavariData();
 }
 
@@ -60,26 +62,64 @@ function seedRealEastGodavariData() {
   const userCount = (db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number }).count;
   if (userCount > 0) return;
 
+  const defaultVoterPinHash = bcrypt.hashSync('1234', 10);
+  const defaultAdminPassHash = bcrypt.hashSync('admin@123', 10);
+  const defaultCandidatePassHash = bcrypt.hashSync('candidate@123', 10);
+
   const insertUser = db.prepare(`
-    INSERT INTO users (id, name, email, role, constituency, is_approved_voter, has_voted)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO users (id, name, email, password_hash, role, constituency, is_approved_voter, has_voted)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  // Real South Indian Citizens / Voters from East Godavari District (Kakinada, Rajahmundry, Amalapuram)
-  const realVoters = [
+  // Admin and Citizens / Voters from East Godavari District
+  const realUsers = [
     {
       id: 'eg-admin-01',
       name: 'District Election Officer (East Godavari)',
-      email: 'collector.kakinada@ap.gov.in',
+      email: 'admin@elections.ap.gov.in',
+      password_hash: defaultAdminPassHash,
       role: 'ADMIN',
       constituency: 'East Godavari Headquarters',
       isApproved: 0,
       hasVoted: 0,
     },
+    // Candidate accounts
+    {
+      id: 'eg-user-cand-01',
+      name: 'Vanamadi Venkateswara Rao (Konda Babu)',
+      email: 'kondababu.tdp@gmail.com',
+      password_hash: defaultCandidatePassHash,
+      role: 'CANDIDATE',
+      constituency: 'Kakinada City',
+      isApproved: 1,
+      hasVoted: 0,
+    },
+    {
+      id: 'eg-user-cand-02',
+      name: 'Dwarampudi Chandrasekhar Reddy',
+      email: 'chandrasekhar.ysrcp@gmail.com',
+      password_hash: defaultCandidatePassHash,
+      role: 'CANDIDATE',
+      constituency: 'Kakinada City',
+      isApproved: 1,
+      hasVoted: 0,
+    },
+    {
+      id: 'eg-user-cand-03',
+      name: 'Pantham Nanaji',
+      email: 'nanaji.jsp@gmail.com',
+      password_hash: defaultCandidatePassHash,
+      role: 'CANDIDATE',
+      constituency: 'Kakinada Rural',
+      isApproved: 1,
+      hasVoted: 0,
+    },
+    // Voters (Voter ID + PIN '1234')
     {
       id: 'eg-voter-101',
       name: 'Chundru Venkata Satyanarayana Murthy',
       email: 'cv.satyamurthy@gmail.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Kakinada City',
       isApproved: 1,
@@ -89,6 +129,7 @@ function seedRealEastGodavariData() {
       id: 'eg-voter-102',
       name: 'Alluri Sita Lakshmi Devi',
       email: 'sitalakshmi.alluri@outlook.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Rajahmundry City',
       isApproved: 1,
@@ -98,6 +139,7 @@ function seedRealEastGodavariData() {
       id: 'eg-voter-103',
       name: 'Gollapalli Subba Rao',
       email: 'subbarao.gollapalli@yahoo.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Kakinada Rural',
       isApproved: 1,
@@ -107,6 +149,7 @@ function seedRealEastGodavariData() {
       id: 'eg-voter-104',
       name: 'Kondepudi Bhavani Prasanna',
       email: 'bhavani.kondepudi@gmail.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Rajahmundry Rural',
       isApproved: 1,
@@ -116,24 +159,27 @@ function seedRealEastGodavariData() {
       id: 'eg-voter-105',
       name: 'Maddipati Surya Narayana Raju',
       email: 'surya.maddipati@gmail.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Pithapuram',
-      isApproved: 0, // Unapproved pending admin verification
+      isApproved: 0,
       hasVoted: 0,
     },
     {
       id: 'eg-voter-106',
       name: 'Vemulapati Padma Gayatri',
       email: 'gayatri.vemulapati@rediffmail.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Kakinada City',
-      isApproved: 0, // Unapproved pending admin verification
+      isApproved: 0,
       hasVoted: 0,
     },
     {
       id: 'eg-voter-107',
       name: 'Nadiminti Veerabhadra Rao',
       email: 'veerabhadra.nadiminti@gmail.com',
+      password_hash: defaultVoterPinHash,
       role: 'VOTER',
       constituency: 'Amalapuram',
       isApproved: 1,
@@ -141,13 +187,13 @@ function seedRealEastGodavariData() {
     },
   ];
 
-  for (const u of realVoters) {
-    insertUser.run(u.id, u.name, u.email, u.role, u.constituency, u.isApproved, u.hasVoted);
+  for (const u of realUsers) {
+    insertUser.run(u.id, u.name, u.email, u.password_hash, u.role, u.constituency, u.isApproved, u.hasVoted);
   }
 
   const insertCandidate = db.prepare(`
-    INSERT INTO candidates (id, name, party_name, party_symbol, symbol_photo_url, candidate_photo_url, constituency, manifesto, approval_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO candidates (id, user_id, name, party_name, party_symbol, symbol_photo_url, candidate_photo_url, constituency, manifesto, approval_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertVoteCount = db.prepare(`
@@ -155,10 +201,10 @@ function seedRealEastGodavariData() {
     VALUES (?, ?)
   `);
 
-  // Real South Indian Participants & Candidates representing East Godavari District
   const realCandidates = [
     {
       id: 'cand-eg-01',
+      user_id: 'eg-user-cand-01',
       name: 'Vanamadi Venkateswara Rao (Konda Babu)',
       party_name: 'Telugu Desam Party (TDP)',
       party_symbol: '🚲 Bicycle',
@@ -171,6 +217,7 @@ function seedRealEastGodavariData() {
     },
     {
       id: 'cand-eg-02',
+      user_id: 'eg-user-cand-02',
       name: 'Dwarampudi Chandrasekhar Reddy',
       party_name: 'Yuvajana Sramika Rythu Congress Party (YSRCP)',
       party_symbol: '🪭 Fan',
@@ -183,6 +230,7 @@ function seedRealEastGodavariData() {
     },
     {
       id: 'cand-eg-03',
+      user_id: 'eg-user-cand-03',
       name: 'Pantham Nanaji',
       party_name: 'Jana Sena Party (JSP)',
       party_symbol: '🥛 Glass Tumbler',
@@ -195,6 +243,7 @@ function seedRealEastGodavariData() {
     },
     {
       id: 'cand-eg-04',
+      user_id: null,
       name: 'Adireddy Srinivas (Vasu)',
       party_name: 'Telugu Desam Party (TDP)',
       party_symbol: '🚲 Bicycle',
@@ -207,6 +256,7 @@ function seedRealEastGodavariData() {
     },
     {
       id: 'cand-eg-05',
+      user_id: null,
       name: 'Margani Bharat Ram',
       party_name: 'Yuvajana Sramika Rythu Congress Party (YSRCP)',
       party_symbol: '🪭 Fan',
@@ -214,7 +264,7 @@ function seedRealEastGodavariData() {
       cand_url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=300&auto=format&fit=crop&q=80',
       constituency: 'Rajahmundry City',
       manifesto: 'Airport expansion in Madhurapudi, arts & culture university encouragement, and financial security schemes for Godavari transport workers.',
-      status: 'PENDING', // Pending nomination awaiting Admin approval
+      status: 'PENDING',
       votes: 0,
     },
   ];
@@ -222,6 +272,7 @@ function seedRealEastGodavariData() {
   for (const c of realCandidates) {
     insertCandidate.run(
       c.id,
+      c.user_id,
       c.name,
       c.party_name,
       c.party_symbol,
