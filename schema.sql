@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS users (
     constituency TEXT NOT NULL DEFAULT 'East Godavari',
     is_approved_voter INTEGER NOT NULL DEFAULT 0,
     has_voted INTEGER NOT NULL DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- Voter sign-in is a one-time email code, not a stored PIN.
+    otp_hash TEXT,
+    otp_expires_at TEXT,
+    otp_last_sent_at TEXT
 );
 
 -- 2. Candidates Table

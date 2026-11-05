@@ -2,8 +2,16 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { db, initDatabase } from './db.js';
 import type { Candidate, User, ElectionStats, AuthResponse } from './models/index.js';
+
+try {
+  // Loads vote-backend/.env (gitignored) into process.env.
+  process.loadEnvFile();
+} catch {
+  // No .env file present (e.g. production env vars injected another way) — fine.
+}
 
 initDatabase();
 
@@ -11,9 +19,49 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'east_godavari_election_super_secure_key_2026';
 const TOKEN_EXPIRY_SECONDS = 3600; // 1 hour
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds
+
+const EMAILJS_SERVICE_ID = process.env.EMAILJS_SERVICE_ID;
+const EMAILJS_TEMPLATE_ID = process.env.EMAILJS_TEMPLATE_ID;
+const EMAILJS_PUBLIC_KEY = process.env.EMAILJS_PUBLIC_KEY;
+const EMAILJS_PRIVATE_KEY = process.env.EMAILJS_PRIVATE_KEY;
+const EMAILJS_FROM_NAME = process.env.EMAILJS_FROM_NAME || 'East Godavari Election Commission';
 
 app.use(cors());
 app.use(express.json());
+
+// Sends the voter's one-time login code via EmailJS's REST API.
+async function sendOtpEmail(toEmail: string, voterName: string, otp: string): Promise<void> {
+  if (!EMAILJS_SERVICE_ID || !EMAILJS_TEMPLATE_ID || !EMAILJS_PUBLIC_KEY) {
+    console.log(`[DEV] OTP for ${toEmail} (EmailJS not configured): ${otp}`);
+    return;
+  }
+
+  const res = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      service_id: EMAILJS_SERVICE_ID,
+      template_id: EMAILJS_TEMPLATE_ID,
+      user_id: EMAILJS_PUBLIC_KEY,
+      accessToken: EMAILJS_PRIVATE_KEY || undefined,
+      template_params: {
+        to_email: toEmail,
+        from_name: EMAILJS_FROM_NAME,
+        from_email: toEmail,
+        to_name: voterName,
+        message: `Your one-time voting PIN is ${otp}. It expires in 5 minutes and can only be used once.`,
+        otp_code: otp,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`EmailJS send failed (${res.status}): ${body}`);
+  }
+}
 
 // Helper to format user response
 function formatUser(row: any): User {
@@ -106,27 +154,90 @@ const requireCandidate = (req: Request, res: Response, next: NextFunction): void
    1. AUTHENTICATION ENDPOINTS
 ======================================================== */
 
-// Voter Login (Voter ID + PIN)
-// Generic error message if invalid credentials
-app.post('/api/auth/voter-login', (req: Request, res: Response): void => {
-  const { voterId, pin } = req.body;
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!domain) return email;
+  const visible = local.slice(0, 2);
+  return `${visible}${'*'.repeat(Math.max(local.length - visible.length, 1))}@${domain}`;
+}
 
-  if (!voterId || !pin) {
-    res.status(400).json({ error: 'Invalid voter ID or PIN.' });
+// Voter Login Step 1: request a one-time code emailed to the voter's registered address.
+// Replaces the old static-PIN login — nothing long-lived to leak.
+app.post('/api/auth/voter/request-otp', async (req: Request, res: Response): Promise<void> => {
+  const { voterId } = req.body;
+
+  if (!voterId) {
+    res.status(400).json({ error: 'Voter ID is required.' });
     return;
   }
 
   const userRow = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'VOTER'").get(voterId) as any;
   if (!userRow) {
-    res.status(401).json({ error: 'Invalid voter ID or PIN.' });
+    res.status(404).json({ error: 'Voter ID not found.' });
     return;
   }
 
-  const isValidPin = bcrypt.compareSync(pin, userRow.password_hash);
-  if (!isValidPin) {
-    res.status(401).json({ error: 'Invalid voter ID or PIN.' });
+  if (userRow.has_voted) {
+    res.status(403).json({ error: 'You have already voted. Login is disabled for this account.' });
     return;
   }
+
+  const now = Date.now();
+  if (userRow.otp_last_sent_at && now - new Date(userRow.otp_last_sent_at).getTime() < OTP_RESEND_COOLDOWN_MS) {
+    res.status(429).json({ error: 'Please wait a few seconds before requesting another code.' });
+    return;
+  }
+
+  const otp = crypto.randomInt(100000, 1000000).toString();
+  const otpHash = bcrypt.hashSync(otp, 10);
+  const expiresAt = new Date(now + OTP_TTL_MS).toISOString();
+
+  db.prepare('UPDATE users SET otp_hash = ?, otp_expires_at = ?, otp_last_sent_at = ? WHERE id = ?')
+    .run(otpHash, expiresAt, new Date(now).toISOString(), voterId);
+
+  try {
+    await sendOtpEmail(userRow.email, userRow.name, otp);
+  } catch (err: any) {
+    res.status(502).json({ error: 'Failed to send the OTP email. Please try again shortly.', details: err.message });
+    return;
+  }
+
+  res.json({ success: true, message: `A one-time code was sent to ${maskEmail(userRow.email)}.` });
+});
+
+// Voter Login Step 2: verify the emailed code (single-use, short-lived) and issue a session token.
+app.post('/api/auth/voter/verify-otp', (req: Request, res: Response): void => {
+  const { voterId, otp } = req.body;
+
+  if (!voterId || !otp) {
+    res.status(400).json({ error: 'Voter ID and OTP are required.' });
+    return;
+  }
+
+  const userRow = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'VOTER'").get(voterId) as any;
+  if (!userRow) {
+    res.status(401).json({ error: 'Invalid Voter ID or OTP.' });
+    return;
+  }
+
+  if (userRow.has_voted) {
+    res.status(403).json({ error: 'You have already voted. Login is disabled for this account.' });
+    return;
+  }
+
+  if (!userRow.otp_hash || !userRow.otp_expires_at || Date.now() > new Date(userRow.otp_expires_at).getTime()) {
+    res.status(401).json({ error: 'This code has expired. Please request a new one.' });
+    return;
+  }
+
+  const isValidOtp = bcrypt.compareSync(otp, userRow.otp_hash);
+  if (!isValidOtp) {
+    res.status(401).json({ error: 'Invalid Voter ID or OTP.' });
+    return;
+  }
+
+  // Single-use: clear it immediately so the same code can never be replayed.
+  db.prepare('UPDATE users SET otp_hash = NULL, otp_expires_at = NULL WHERE id = ?').run(voterId);
 
   const user = formatUser(userRow);
   const token = generateToken(user);
@@ -372,31 +483,37 @@ app.patch('/api/admin/voters/:id/approve', authMiddleware, requireAdmin, (req: R
 
 /* Admin-created voter registration */
 app.post('/api/admin/voters', authMiddleware, requireAdmin, (req: Request, res: Response): void => {
-  const { name, voterId, pin, constituency } = req.body;
+  const { name, voterId, email, constituency } = req.body;
 
-  if (!name || !voterId || !pin) {
-    res.status(400).json({ error: 'Name, Voter ID, and PIN are required.' });
+  if (!name || !voterId || !email) {
+    res.status(400).json({ error: 'Name, Voter ID, and email are required.' });
     return;
   }
 
-  if (!/^\d{4}$/.test(pin)) {
-    res.status(400).json({ error: 'PIN must be exactly 4 digits.' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: 'A valid email is required to deliver the one-time sign-in code.' });
     return;
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(voterId) as any;
-  if (existing) {
+  const existingId = db.prepare('SELECT id FROM users WHERE id = ?').get(voterId) as any;
+  if (existingId) {
     res.status(409).json({ error: 'A voter with this Voter ID already exists.' });
     return;
   }
 
-  const pinHash = bcrypt.hashSync(pin, 10);
-  const syntheticEmail = `${voterId}@voter.eastgodavari.gov.in`;
+  const existingEmail = db.prepare('SELECT id FROM users WHERE email = ?').get(email) as any;
+  if (existingEmail) {
+    res.status(409).json({ error: 'A voter with this email already exists.' });
+    return;
+  }
+
+  // Login is OTP-only; password_hash is never used for voters but the column is NOT NULL.
+  const unusedHash = bcrypt.hashSync(crypto.randomUUID(), 10);
 
   db.prepare(`
     INSERT INTO users (id, name, email, password_hash, role, constituency, is_approved_voter, has_voted)
     VALUES (?, ?, ?, ?, 'VOTER', ?, 1, 0)
-  `).run(voterId, name, syntheticEmail, pinHash, constituency || 'East Godavari');
+  `).run(voterId, name, email, unusedHash, constituency || 'East Godavari');
 
   const row = db.prepare('SELECT * FROM users WHERE id = ?').get(voterId) as any;
   res.status(201).json({ success: true, message: 'Voter registered and authorized to vote.', user: formatUser(row) });

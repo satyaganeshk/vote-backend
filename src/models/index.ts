@@ -42,9 +42,13 @@ export interface AuthResponse {
   expiresIn: number; // in seconds
 }
 
-export interface VoterLoginPayload {
+export interface VoterOtpRequestPayload {
   voterId: string;
-  pin: string;
+}
+
+export interface VoterOtpVerifyPayload {
+  voterId: string;
+  otp: string;
 }
 
 export interface CredentialLoginPayload {

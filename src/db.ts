@@ -55,7 +55,21 @@ export function initDatabase(): void {
     );
   `);
 
+  addColumnIfMissing('users', 'otp_hash', 'TEXT');
+  addColumnIfMissing('users', 'otp_expires_at', 'TEXT');
+  addColumnIfMissing('users', 'otp_last_sent_at', 'TEXT');
+
   seedRealEastGodavariData();
+}
+
+// Additive, idempotent migration: safe to run against a voting.db created
+// before these columns existed, without wiping seeded/demo data.
+function addColumnIfMissing(table: string, column: string, type: string): void {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  } catch (err: any) {
+    if (!/duplicate column name/i.test(err.message)) throw err;
+  }
 }
 
 function seedRealEastGodavariData() {
